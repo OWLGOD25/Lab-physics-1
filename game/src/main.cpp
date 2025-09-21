@@ -4,7 +4,20 @@
 #include "raymath.h"
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
+#include <string>
+#include <cmath>
 
+
+using namespace std;  // Allow using string, cout, etc. without std::
+
+
+// Student Info
+const string studentName = "Tyron Fajardo";
+const string studentNumber = "123456789";
+
+
+
+// Simulation parameters
 const unsigned int TARGET_FPS = 50; //1/50 = 0.02
 float time = 0;
 float dt;
@@ -33,6 +46,7 @@ void draw()
     DrawText(TextFormat("FPS: %i, Time: %0.2f", TARGET_FPS, time), GetScreenWidth() - 200, 40, 20, LIGHTGRAY);
 	DrawCircle(x, y, 60, RED);
     DrawCircle(GetScreenWidth() / 2 + cos(time * frequency) * amplitude, GetScreenHeight()/ 2 + sin (time * frequency) * amplitude, 60, BLUE);
+    DrawText((studentName + " " + studentNumber).c_str(), 10, GetScreenHeight() - 30, 20, LIGHTGRAY);
     EndDrawing();
 
 }
@@ -41,7 +55,7 @@ int main()
 {
 	// alternatively you can use the game.h file to declare constants
 	// like this InitWindow(InitialWidth, InitialHeight, "Lab-Physics-1");
-	InitWindow(1200, 800, "Lab-Physics-1");// you can add the game.h file and use it to declare functions and variables
+	InitWindow(1200, 800, ("Game Physics - " + studentName + " " + studentNumber).c_str());// you can add the game.h file and use it to declare functions and variables
 	//which is the numbers in the brackets
     SetTargetFPS(TARGET_FPS);
 
