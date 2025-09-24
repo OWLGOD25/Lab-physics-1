@@ -13,7 +13,7 @@ using namespace std;  // Allow using string, vector, etc. without std::
 // ------------------------------------------------------------
 // Student Info
 const string studentName = "Tyron Fajardo";
-const string studentNumber = "123456789";
+const string studentNumber = "101542713";
 
 // ------------------------------------------------------------
 // Simulation parameters
@@ -93,7 +93,8 @@ void draw()
     DrawText(("Student Number: " + studentNumber).c_str(), 10, GetScreenHeight() - 20, 20, LIGHTGRAY);
 
     // Elapsed time (Week 1)
-    DrawText(TextFormat("Time: %.2f", timeElapsed), GetScreenWidth() - 150, 20, 20, LIGHTGRAY);
+    DrawText(TextFormat("Time: %.2f  |  FPS: %i", timeElapsed, GetFPS()), GetScreenWidth() - 250, 10, 20, LIGHTGRAY);
+   
 
     // GUI sliders 
     GuiSliderBar(Rectangle{ 60, 40, 200, 20 }, "Speed", TextFormat("%.0f", launchSpeed), &launchSpeed, 50, 600);
@@ -102,10 +103,7 @@ void draw()
 
     // Launch guide (Week 2)
     Vector2 startPos = { 200, (float)GetScreenHeight() - 200 };
-    Vector2 guide = {
-        cos(launchAngle * DEG2RAD) * launchSpeed,
-        -sin(launchAngle * DEG2RAD) * launchSpeed
-    };
+    Vector2 guide = { cos(launchAngle * DEG2RAD) * launchSpeed, -sin(launchAngle * DEG2RAD) * launchSpeed};
     DrawLineEx(startPos, startPos + guide * 0.2f, 3, RED);
 
     // Projectiles (Week 2–4)
