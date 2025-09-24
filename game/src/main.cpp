@@ -26,6 +26,8 @@ float y = 500;
 float amplitude = 70;
 float frequency = 1.0f; // in Hz
 
+float speed = 100;
+float angle = 30; // in degrees or whatever
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void update()
@@ -37,6 +39,9 @@ void update()
 
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
 void draw()
 {
     BeginDrawing();
@@ -44,12 +49,23 @@ void draw()
     DrawText("Hello world!", 10, 10, 20, LIGHTGRAY);
     GuiSliderBar(Rectangle{ 60, (float)GetScreenHeight() -10, 1000, 10 }, "Time", TextFormat("%.2f", time), &time, 0, 240);
     DrawText(TextFormat("FPS: %i, Time: %0.2f", TARGET_FPS, time), GetScreenWidth() - 200, 40, 20, LIGHTGRAY);
-	DrawCircle(x, y, 60, RED);
-    DrawCircle(GetScreenWidth() / 2 + cos(time * frequency) * amplitude, GetScreenHeight()/ 2 + sin (time * frequency) * amplitude, 60, BLUE);
-    DrawText((studentName + " " + studentNumber).c_str(), 10, GetScreenHeight() - 30, 20, LIGHTGRAY);
+    GuiSliderBar(Rectangle{ 60, 40, 100, 10 }, "Porabula", TextFormat("%.0f", speed), &speed, -100, 1000);
+    GuiSliderBar(Rectangle{ 60, 60, 100, 10 }, "Degrees", TextFormat("%.0f", angle), &angle, -180, 180);
+    // here is the code for circles
+	//DrawCircle(x, y, 60, RED);
+  //  DrawCircle(GetScreenWidth() / 2 + cos(time * frequency) * amplitude, GetScreenHeight()/ 2 + sin (time * frequency) * amplitude, 60, BLUE);
+  //  DrawText((studentName + " " + studentNumber).c_str(), 10, GetScreenHeight() - 30, 20, LIGHTGRAY);
+
+    Vector2 startpos = { 200, GetScreenHeight() -200 };
+    Vector2 velocity = { cos(angle * DEG2RAD) * speed, -sin(angle * DEG2RAD) * speed};
+    
+    DrawLineEx(startpos , startpos + velocity, 3, RED);
     EndDrawing();
 
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 
 int main()
 {
@@ -68,3 +84,5 @@ int main()
     CloseWindow();
     return 0;
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
