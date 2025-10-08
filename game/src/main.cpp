@@ -32,6 +32,8 @@ struct Projectile {
     Vector2 position;
     Vector2 velocity;
     bool active;
+    Color color;
+    float radius = 8.0f;
 };
 
 // container for projectiles
@@ -48,7 +50,16 @@ void LaunchProjectile(float speed, float angleDeg)
         -sin(angleDeg * DEG2RAD) * speed
     };
     p.active = true;
+    p.color = RED;
     projectiles.push_back(p);
+}
+
+// ------------------------------------------------------------
+// Detect Sphere-Sphere Overlap (Week 5 / Ex 3)
+bool CheckSphereCollision(const Projectile& a, const Projectile& b)
+{
+    float dist = Vector2Distance(a.position, b.position);
+    return dist < (a.radius + b.radius);
 }
 
 // ------------------------------------------------------------
@@ -80,6 +91,21 @@ void update()
                 p.active = false;
         }
     }
+    // Week 5: Sphere-Sphere Overlap Detection
+    for (size_t i = 0; i < projectiles.size(); i++)
+    {
+        bool overlapping = false;
+        for (size_t j = 0; j < projectiles.size(); j++)
+        {
+            if (i == j) continue;
+            if (CheckSphereCollision(projectiles[i], projectiles[j]))
+            {
+                overlapping = true;
+                break;
+            }
+        }
+        projectiles[i].color = overlapping ? RED : LIGHTGRAY;
+    }
 }
 
 // ------------------------------------------------------------
@@ -106,13 +132,10 @@ void draw()
     Vector2 guide = { cos(launchAngle * DEG2RAD) * launchSpeed, -sin(launchAngle * DEG2RAD) * launchSpeed};
     DrawLineEx(startPos, startPos + guide * 0.2f, 3, RED);
 
-    // Projectiles (Week 2–4)
+    // Projectiles (Week 2–5)
     for (auto& p : projectiles)
     {
-        if (p.active)
-            DrawCircleV(p.position, 8, RED);
-        else
-            DrawCircleV(p.position, 8, DARKGRAY);
+        DrawCircleV(p.position, p.radius, p.color);
     }
 
     EndDrawing();
