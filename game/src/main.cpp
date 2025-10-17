@@ -25,6 +25,7 @@ float dt;
 float launchSpeed = 300;  // pixels per second
 float launchAngle = 45;   // degrees
 float gravity = 400; // downward acceleration
+float groundY = 700; // y position of the ground
 
 // ------------------------------------------------------------
 // Projectile structure
@@ -63,6 +64,14 @@ bool CheckSphereCollision(const Projectile& a, const Projectile& b)
 }
 
 // ------------------------------------------------------------
+// Detect Sphere–Halfspace Overlap (Ex 4)
+bool CheckSphereHalfspace(const Projectile& p, float groundY)
+{
+    // Sphere overlaps if bottom of sphere goes below the ground
+    return (p.position.y + p.radius) > groundY;
+}
+
+// ------------------------------------------------------------
 void update()
 {
     dt = 1.0f / TARGET_FPS;
@@ -82,11 +91,11 @@ void update()
         p.position += p.velocity * dt;
         p.velocity.y += gravity * dt;
 
-        // Week 4: ground collision
-        if (p.position.y >= GetScreenHeight() - 50)
+        // Week 4: ground collision(changed for lab4)
+        if (p.position.y + p.radius >= groundY)
         {
-            p.position.y = GetScreenHeight() - 50;
-            p.velocity.y *= -0.5f; // bounce with damping
+            p.position.y = groundY - p.radius;
+            p.velocity.y *= -0.5f;
             if (fabs(p.velocity.y) < 20)
                 p.active = false;
         }
@@ -105,6 +114,16 @@ void update()
             }
         }
         projectiles[i].color = overlapping ? RED : LIGHTGRAY;
+
+
+        // --------------------------------------------------------
+        // Ex 4: Also check Sphere–Halfspace Overlap
+        bool halfOverlap = CheckSphereHalfspace(projectiles[i], groundY);
+
+        if (overlapping || halfOverlap)
+            projectiles[i].color = RED;
+        else
+            projectiles[i].color = LIGHTGRAY;
     }
 }
 
@@ -126,11 +145,15 @@ void draw()
     GuiSliderBar(Rectangle{ 60, 40, 200, 20 }, "Speed", TextFormat("%.0f", launchSpeed), &launchSpeed, 50, 600);
     GuiSliderBar(Rectangle{ 60, 70, 200, 20 }, "Angle", TextFormat("%.0f", launchAngle), &launchAngle, 0, 90);
     GuiSliderBar(Rectangle{ 60, 100, 200, 20 }, "Gravity", TextFormat("%.0f", gravity), &gravity, -600, 600);
+    GuiSliderBar(Rectangle{ 60, 130, 200, 20 }, "Ground Y", TextFormat("%.0f", groundY), &groundY, 400, (float)GetScreenHeight());
 
     // Launch guide (Week 2)
     Vector2 startPos = { 200, (float)GetScreenHeight() - 200 };
     Vector2 guide = { cos(launchAngle * DEG2RAD) * launchSpeed, -sin(launchAngle * DEG2RAD) * launchSpeed};
     DrawLineEx(startPos, startPos + guide * 0.2f, 3, RED);
+
+    // Draw Halfspace (ground)
+    DrawLine(0, groundY, GetScreenWidth(), groundY, GREEN);
 
     // Projectiles (Week 2–5)
     for (auto& p : projectiles)
