@@ -1,4 +1,4 @@
-// the raylib website https://www.raylib.com/index.html
+ï»¿// the raylib website https://www.raylib.com/index.html
 
 #include "raylib.h"
 #include "raymath.h"
@@ -64,7 +64,7 @@ bool CheckSphereCollision(const Projectile& a, const Projectile& b)
 }
 
 // ------------------------------------------------------------
-// Detect Sphere–Halfspace Overlap (Ex 4)
+// Detect Sphereâ€“Halfspace Overlap (Ex 4)
 bool CheckSphereHalfspace(const Projectile& p, float groundY)
 {
     // Sphere overlaps if bottom of sphere goes below the ground
@@ -100,31 +100,32 @@ void update()
                 p.active = false;
         }
     }
-    // Week 5: Sphere-Sphere Overlap Detection
-    for (size_t i = 0; i < projectiles.size(); i++)
-    {
-        bool overlapping = false;
-        for (size_t j = 0; j < projectiles.size(); j++)
-        {
-            if (i == j) continue;
-            if (CheckSphereCollision(projectiles[i], projectiles[j]))
-            {
-                overlapping = true;
-                break;
-            }
-        }
-        projectiles[i].color = overlapping ? RED : LIGHTGRAY;
+
+  // Week 5: Balls Overlap Detection
+  for (size_t i = 0; i < projectiles.size(); i++)
+  {
+      bool overlapping = false;
+      for (size_t j = 0; j < projectiles.size(); j++)
+      {
+          if (i == j) continue;
+          if (CheckSphereCollision(projectiles[i], projectiles[j]))
+          {
+              overlapping = true;
+              break;
+          }
+      }
+      projectiles[i].color = overlapping ? RED : LIGHTGRAY;
 
 
-        // --------------------------------------------------------
-        // Ex 4: Also check Sphere–Halfspace Overlap
-        bool halfOverlap = CheckSphereHalfspace(projectiles[i], groundY);
+      // --------------------------------------------------------
+      // Ex 4: Balls-Halfspace Overlap (which checks if the balls are touching or under the ground Y)
+      bool halfOverlap = CheckSphereHalfspace(projectiles[i], groundY);
 
-        if (overlapping || halfOverlap)
-            projectiles[i].color = RED;
-        else
-            projectiles[i].color = LIGHTGRAY;
-    }
+      if (overlapping || halfOverlap)
+          projectiles[i].color = RED;
+      else
+          projectiles[i].color = LIGHTGRAY;
+  }
 }
 
 // ------------------------------------------------------------
@@ -155,7 +156,7 @@ void draw()
     // Draw Halfspace (ground)
     DrawLine(0, groundY, GetScreenWidth(), groundY, GREEN);
 
-    // Projectiles (Week 2–5)
+    // Projectiles (Week 2â€“5)
     for (auto& p : projectiles)
     {
         DrawCircleV(p.position, p.radius, p.color);
