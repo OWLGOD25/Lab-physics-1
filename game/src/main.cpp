@@ -10,7 +10,7 @@
 #include <vector>
 #include <algorithm>
 
-using namespace std;  // std:: convenience but not really need for this but always nice to have it ;)
+using namespace std;  // std:: convenience
 
 // ------------------------------------------------------------
 // Student Info
@@ -30,9 +30,20 @@ float gravityAcc = 400.0f;   // px/s^2 (down)
 float restitutionSS = 0.40f;    // sphere-sphere restitution (0..1)
 float restitutionPlane = 0.60f;    // sphere-plane restitution (0..1)
 
+// NEW (Lab 6): Coulomb friction coefficients
+// Plane contact friction
+float mu_s_plane = 0.6f;  // static friction coefficient for sphere-plane
+float mu_k_plane = 0.5f;  // kinetic friction coefficient for sphere-plane
+// Sphere-sphere friction
+float mu_s_ss = 0.4f;  // static friction coefficient for sphere-sphere
+float mu_k_ss = 0.3f;  // kinetic friction coefficient for sphere-sphere
+
 // sphere-sphere positional correction
 const float POS_CORRECT_PERCENT = 0.80f; // 80% of penetration per frame
 const float POS_CORRECT_SLOP = 0.01f; // tolerance
+
+// thresholds
+const float STATIC_VEL_EPS = 0.05f;  // ~stopped along tangent counts as static
 
 // ------------------------------------------------------------
 // Projectile (sphere)
@@ -90,12 +101,19 @@ static inline bool SphereSphereOverlap(const Projectile& a, const Projectile& b,
     return true;
 }
 
+// Safe normalize helper
+static inline Vector2 SafeNormalize(const Vector2& v, const Vector2& fallback = { 1.0f, 0.0f }) {
+    float len = Vector2Length(v);
+    return (len > 1e-6f) ? Vector2Scale(v, 1.0f / len) : fallback;
+}
+
 // ------------------------------------------------------------
 // Collision response
 
-// Lab 5: Sphere–Halfspace (plane) response with restitution (bouncy)
+// -------- Sphere–Plane (with restitution + Coulomb friction) --------
 // 1) Separate out of plane along normal by penetration
-// 2) Reflect normal component with restitution
+// 2) Reflect normal component with restitution (bounce)
+// 3) Apply friction impulse along tangent (static/kinetic Coulomb)
 bool ResolveSphereHalfspace(Projectile& p, const Plane2D& plane) {
     Vector2 n = PlaneNormal(plane.angleDeg);
     Vector2 p0 = { plane.pivotX, plane.pivotY };
@@ -104,22 +122,49 @@ bool ResolveSphereHalfspace(Projectile& p, const Plane2D& plane) {
 
     if (penetration <= 0.0f) return false;
 
-    // Separate
+    // (1) Separate out of plane
     p.position = Vector2Add(p.position, Vector2Scale(n, penetration));
 
-    // Reflect normal component with restitution
-    float vn = Vector2DotProduct(p.velocity, n);   // <0 means into plane
+    // Decompose velocity into normal/tangent
+    float vn = Vector2DotProduct(p.velocity, n);              // normal component (scalar)
+    Vector2 t = { n.y, -n.x };                                // tangent unit vector
+    float vt = Vector2DotProduct(p.velocity, t);              // tangential scalar
+
+    // (2) Normal bounce (only if going into plane)
+    float jn_mag = 0.0f;
     if (vn < 0.0f) {
         // v' = v - (1 + e) * vn * n
-        p.velocity = Vector2Subtract(p.velocity, Vector2Scale(n, (1.0f + restitutionPlane) * vn));
+        float delta = (1.0f + restitutionPlane) * vn;         // vn is negative
+        p.velocity = Vector2Subtract(p.velocity, Vector2Scale(n, delta));
+        jn_mag = -(1.0f + restitutionPlane) * vn * p.mass;    // normal impulse magnitude (positive)
+    }
+
+    // (3) Coulomb friction impulse along tangent
+    if (jn_mag > 0.0f) {
+        // desired tangential impulse to kill vt
+        float jt_req = -vt * p.mass; // plane is static -> effective mass = m
+        float jt_cap_static = mu_s_plane * jn_mag;
+        float jt_cap_kinetic = mu_k_plane * jn_mag;
+
+        float jt = 0.0f;
+        if (fabsf(vt) < STATIC_VEL_EPS && fabsf(jt_req) <= jt_cap_static) {
+            // Static friction can fully stop tangential motion
+            jt = jt_req;
+        }
+        else {
+            // Kinetic friction clamps to mu_k * jn
+            jt = Clamp(jt_req, -jt_cap_kinetic, jt_cap_kinetic);
+        }
+        // Apply tangential impulse
+        p.velocity = Vector2Add(p.velocity, Vector2Scale(t, jt / p.mass));
     }
 
     return true;
 }
 
-// Sphere–Sphere response: positional correction + impulse with restitution
+// -------- Sphere–Sphere (impulse + positional correction + friction) --------
 void ResolveSphereSphere(Projectile& a, Projectile& b, float e /*restitutionSS*/) {
-    float penetration; Vector2 n;
+    float penetration; Vector2 n; // normal from a->b
     if (!SphereSphereOverlap(a, b, penetration, n)) return;
 
     float invA = (a.mass > 0.0f) ? 1.0f / a.mass : 0.0f;
@@ -127,24 +172,48 @@ void ResolveSphereSphere(Projectile& a, Projectile& b, float e /*restitutionSS*/
     float invSum = invA + invB;
     if (invSum <= 0.0f) return;
 
-    // Positional correction (split by inverse mass)
+    // (A) Positional correction (to prevent sinking)
     float remove = max(penetration - POS_CORRECT_SLOP, 0.0f) * POS_CORRECT_PERCENT / invSum;
     Vector2 corr = Vector2Scale(n, remove);
     a.position = Vector2Subtract(a.position, Vector2Scale(corr, invA));
     b.position = Vector2Add(b.position, Vector2Scale(corr, invB));
 
-    // Relative velocity along normal
+    // Relative velocity at contact
     Vector2 rv = Vector2Subtract(b.velocity, a.velocity);
+
+    // (B) Normal impulse (bounce)
     float velAlongNormal = Vector2DotProduct(rv, n);
-    if (velAlongNormal > 0.0f) return; // already separating
+    if (velAlongNormal < 0.0f) {
+        float jn = -(1.0f + e) * velAlongNormal;
+        jn /= invSum;
 
-    // Impulse scalar
-    float j = -(1.0f + e) * velAlongNormal;
-    j /= invSum;
+        Vector2 impulseN = Vector2Scale(n, jn);
+        a.velocity = Vector2Subtract(a.velocity, Vector2Scale(impulseN, invA));
+        b.velocity = Vector2Add(b.velocity, Vector2Scale(impulseN, invB));
 
-    Vector2 impulse = Vector2Scale(n, j);
-    a.velocity = Vector2Subtract(a.velocity, Vector2Scale(impulse, invA));
-    b.velocity = Vector2Add(b.velocity, Vector2Scale(impulse, invB));
+        // (C) Friction impulse along tangent
+        // Recompute relative velocity after normal impulse
+        rv = Vector2Subtract(b.velocity, a.velocity);
+        Vector2 t = SafeNormalize(Vector2Subtract(rv, Vector2Scale(n, Vector2DotProduct(rv, n))), { n.y, -n.x });
+        float vt = Vector2DotProduct(rv, t);
+
+        // desired friction impulse to kill vt
+        float jt_req = -vt / invSum; // effective mass = 1/(invA+invB)
+        float jt_cap_static = mu_s_ss * jn;
+        float jt_cap_kinetic = mu_k_ss * jn;
+
+        float jt = 0.0f;
+        if (fabsf(vt) < STATIC_VEL_EPS && fabsf(jt_req) <= jt_cap_static) {
+            jt = jt_req; // static friction
+        }
+        else {
+            jt = Clamp(jt_req, -jt_cap_kinetic, jt_cap_kinetic); // kinetic friction
+        }
+
+        Vector2 impulseT = Vector2Scale(t, jt);
+        a.velocity = Vector2Subtract(a.velocity, Vector2Scale(impulseT, invA));
+        b.velocity = Vector2Add(b.velocity, Vector2Scale(impulseT, invB));
+    }
 }
 
 // ------------------------------------------------------------
@@ -237,7 +306,7 @@ void update() {
         if (hitA || hitB) p.color = RED;
 
         // settle threshold to kill micro-jitter
-        if (fabsf(p.velocity.x) < 0.03f && fabsf(p.velocity.y) < 0.03f)
+        if (fabsf(p.velocity.x) < 0.02f && fabsf(p.velocity.y) < 0.02f)
             p.velocity = { 0.0f, 0.0f };
     }
 }
@@ -255,32 +324,71 @@ void draw() {
     DrawText(TextFormat("Time: %.2f  |  FPS: %i", timeElapsed, GetFPS()),
         GetScreenWidth() - 260, 10, 20, LIGHTGRAY);
 
-    // ----------------- GUI (shifted right) -----------------
-    const float GUI_X = 340.0f;
-    const float W = 260.0f;
-    float y = 40.0f; const float DY = 30.0f;
+    // ----------------- GUI (two columns) -----------------
+    const float colWidth = 240.0f;
+    const float colGap = 100.0f;
+    const float col1X = 150.0f;
+    const float col2X = col1X + colWidth + colGap;
+    const float topY = 40.0f;
+    const float DY = 30.0f;
 
-    GuiSliderBar({ GUI_X, y, W, 20 }, "Speed", TextFormat("%.0f", launchSpeed), &launchSpeed, 50, 600); y += DY;
-    GuiSliderBar({ GUI_X, y, W, 20 }, "Angle", TextFormat("%.0f", launchAngle), &launchAngle, 0, 90); y += DY;
-    GuiSliderBar({ GUI_X, y, W, 20 }, "Gravity", TextFormat("%.0f", gravityAcc), &gravityAcc, -1200, 1200); y += DY;
-    GuiSliderBar({ GUI_X, y, W, 20 }, "Restitution (S-S)", TextFormat("%.2f", restitutionSS), &restitutionSS, 0.0f, 1.0f); y += DY;
-    GuiSliderBar({ GUI_X, y, W, 20 }, "Restitution (S-Plane)", TextFormat("%.2f", restitutionPlane), &restitutionPlane, 0.0f, 1.0f); y += DY + 10;
+    float y1 = topY;
+    float y2 = topY;
+
+    // ------- Column 1: core projectile & plane friction -------
+
+    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Speed",
+        TextFormat("%.0f", launchSpeed), &launchSpeed, 50, 600); y1 += DY;
+    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Angle",
+        TextFormat("%.0f", launchAngle), &launchAngle, 0, 90); y1 += DY;
+    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Gravity",
+        TextFormat("%.0f", gravityAcc), &gravityAcc, -1200, 1200); y1 += DY + 6;
+
+    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Restitution (S-S)",
+        TextFormat("%.2f", restitutionSS), &restitutionSS, 0.0f, 1.0f); y1 += DY;
+    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Restitution (S-Plane)",
+        TextFormat("%.2f", restitutionPlane), &restitutionPlane, 0.0f, 1.0f); y1 += DY + 10;
+
+    // Plane friction checkbox + sliders
+    DrawText("Friction (Plane)", col1X, y1 - 6, 18, LIGHTGRAY); y1 += DY;
+    GuiSliderBar({ col1X, y1, colWidth, 20 }, "mu_s (static)",
+        TextFormat("%.2f", mu_s_plane), &mu_s_plane, 0.0f, 1.5f); y1 += DY;
+    GuiSliderBar({ col1X, y1, colWidth, 20 }, "mu_k (kinetic)",
+        TextFormat("%.2f", mu_k_plane), &mu_k_plane, 0.0f, 1.5f); y1 += DY + 10;
 
     // Plane A controls
-    DrawText("Plane A (Ground)", GUI_X, y - 6, 18, LIGHTGRAY); y += DY;
-    GuiSliderBar({ GUI_X, y, W, 20 }, "Pos X", TextFormat("%.0f", planeA.pivotX), &planeA.pivotX, 0, (float)GetScreenWidth());  y += DY;
-    GuiSliderBar({ GUI_X, y, W, 20 }, "Pos Y", TextFormat("%.0f", planeA.pivotY), &planeA.pivotY, 0, (float)GetScreenHeight()); y += DY;
-    GuiSliderBar({ GUI_X, y, W, 20 }, "Angle", TextFormat("%.0f", planeA.angleDeg), &planeA.angleDeg, -90.0f, 90.0f);              y += DY + 10;
+    DrawText("Plane A (Ground)", col1X, y1 - 6, 18, LIGHTGRAY); y1 += DY;
+    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Pos X",
+        TextFormat("%.0f", planeA.pivotX), &planeA.pivotX, 0, (float)GetScreenWidth()); y1 += DY;
+    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Pos Y",
+        TextFormat("%.0f", planeA.pivotY), &planeA.pivotY, 0, (float)GetScreenHeight()); y1 += DY;
+    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Angle",
+        TextFormat("%.0f", planeA.angleDeg), &planeA.angleDeg, -90.0f, 90.0f); y1 += DY;
+
+    // ------- Column 2: sphere–sphere friction & Plane B -------
+
+
+    DrawText("Friction (Sphere-Sphere)", col2X, y2 - 6, 18, LIGHTGRAY); y2 += DY;
+    GuiSliderBar({ col2X, y2, colWidth, 20 }, "mu_s (static)",
+        TextFormat("%.2f", mu_s_ss), &mu_s_ss, 0.0f, 1.5f); y2 += DY;
+    GuiSliderBar({ col2X, y2, colWidth, 20 }, "mu_k (kinetic)",
+        TextFormat("%.2f", mu_k_ss), &mu_k_ss, 0.0f, 1.5f); y2 += DY + 10;
 
     // Plane B controls
-    DrawText("Plane B (Ramp)", GUI_X, y - 6, 18, LIGHTGRAY); y += DY;
-    GuiSliderBar({ GUI_X, y, W, 20 }, "Pos X", TextFormat("%.0f", planeB.pivotX), &planeB.pivotX, 0, (float)GetScreenWidth());  y += DY;
-    GuiSliderBar({ GUI_X, y, W, 20 }, "Pos Y", TextFormat("%.0f", planeB.pivotY), &planeB.pivotY, 0, (float)GetScreenHeight()); y += DY;
-    GuiSliderBar({ GUI_X, y, W, 20 }, "Angle", TextFormat("%.0f", planeB.angleDeg), &planeB.angleDeg, -90.0f, 90.0f);              y += DY;
+    DrawText("Plane B (Ramp)", col2X, y2 - 6, 18, LIGHTGRAY); y2 += DY;
+    GuiSliderBar({ col2X, y2, colWidth, 20 }, "Pos X",
+        TextFormat("%.0f", planeB.pivotX), &planeB.pivotX, 0, (float)GetScreenWidth()); y2 += DY;
+    GuiSliderBar({ col2X, y2, colWidth, 20 }, "Pos Y",
+        TextFormat("%.0f", planeB.pivotY), &planeB.pivotY, 0, (float)GetScreenHeight()); y2 += DY;
+    GuiSliderBar({ col2X, y2, colWidth, 20 }, "Angle",
+        TextFormat("%.0f", planeB.angleDeg), &planeB.angleDeg, -90.0f, 90.0f); y2 += DY;
+
+    // ----------------- Scene drawing -----------------
 
     // Launch guide
     Vector2 startPos = { 200.0f, (float)GetScreenHeight() - 200.0f };
-    Vector2 guide = { cosf(launchAngle * DEG2RAD) * launchSpeed, -sinf(launchAngle * DEG2RAD) * launchSpeed };
+    Vector2 guide = { cosf(launchAngle * DEG2RAD) * launchSpeed,
+                         -sinf(launchAngle * DEG2RAD) * launchSpeed };
     DrawLineEx(startPos, Vector2Add(startPos, Vector2Scale(guide, 0.2f)), 3, RED);
 
     // Draw planes
@@ -291,13 +399,15 @@ void draw() {
     for (auto& p : projectiles)
         DrawCircleV(p.position, p.radius, p.color);
 
+    // Instructions text at bottom
     DrawText("SPACE: launch | LMB: spawn at mouse\n"
-        "S-Plane: separation + bounce (restitution). S-S: impulse + bounce.\n"
-        "Move planes (X/Y) and rotate Angle; RED = collided this frame.",
-        20, GetScreenHeight() - 120, 18, GRAY);
+        "Lab 6: Toggle friction ON/OFF for Plane and Sphere–Sphere to A/B compare.\n"
+        "Adjust mu_s/mu_k and restitution to see sliding vs sticking and bounce.",
+        20, GetScreenHeight() - 140, 18, GRAY);
 
     EndDrawing();
 }
+
 
 // ------------------------------------------------------------
 int main() {
