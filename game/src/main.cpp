@@ -10,8 +10,9 @@
 #include <vector>
 #include <algorithm>
 
-using namespace std;  // std:: convenience
+using namespace std;  // makes life easier maybe? idk I just like coding with it in lol :)
 
+// Section one
 // ------------------------------------------------------------
 // Student Info
 const string studentName = "Tyron Fajardo";
@@ -23,233 +24,445 @@ const unsigned int TARGET_FPS = 50;
 float timeElapsed = 0.0f;
 float dt = 0.0f;
 
-// adjustable parameters via sliders
-float launchSpeed = 300.0f;   // px/s
-float launchAngle = 45.0f;    // degrees
-float gravityAcc = 400.0f;   // px/s^2 (down)
-float restitutionSS = 0.40f;    // sphere-sphere restitution (0..1)
-float restitutionPlane = 0.60f;    // sphere-plane restitution (0..1)
+// World constants
+const float POS_CORRECT_PERCENT = 0.80f;  // positional correction
+const float POS_CORRECT_SLOP = 0.01f;
+const float STATIC_VEL_EPS = 0.05f;  // tiny velocity ~ stopped
 
-// NEW (Lab 6): Coulomb friction coefficients
-// Plane contact friction
-float mu_s_plane = 0.6f;  // static friction coefficient for sphere-plane
-float mu_k_plane = 0.5f;  // kinetic friction coefficient for sphere-plane
-// Sphere-sphere friction
-float mu_s_ss = 0.4f;  // static friction coefficient for sphere-sphere
-float mu_k_ss = 0.3f;  // kinetic friction coefficient for sphere-sphere
+// ------------------ Adjustable via GUI ------------------
+float gravityAcc = 600.0f;   // px/s^2 (down)
+float globalRestitution = 0.25f;    // bounciness (0..1)
+float globalFrictionCoeff = 0.60f;    // dynamic friction (0..1)
+float pigToughness = 250.0f;   // how hard pigs are to kill
 
-// sphere-sphere positional correction
-const float POS_CORRECT_PERCENT = 0.80f; // 80% of penetration per frame
-const float POS_CORRECT_SLOP = 0.01f; // tolerance
-
-// thresholds
-const float STATIC_VEL_EPS = 0.05f;  // ~stopped along tangent counts as static
+float maxSlingshotPower = 900.0f;   // max launch speed
+float powerScale = 6.0f;     // power per pixel of drag
 
 // ------------------------------------------------------------
-// Projectile (sphere)
-struct Projectile {
+// Slingshot / bird selection
+
+enum ShapeType {
+    SHAPE_CIRCLE,
+    SHAPE_AABB
+};
+
+enum ObjectType {
+    OBJ_BIRD,
+    OBJ_BLOCK,
+    OBJ_PIG,
+    OBJ_STATIC_TERRAIN
+};
+
+struct Body {
+    // physics state
     Vector2 position{ 0.0f, 0.0f };
     Vector2 velocity{ 0.0f, 0.0f };
-    bool    active = false;
-    Color   color = LIGHTGRAY;
-    float   radius = 8.0f;
+
+    // geometry
+    float   radius = 8.0f;        // for circles
+    Vector2 halfExtents{ 10.0f, 10.0f }; // for AABBs
+
+    // physics properties
     float   mass = 1.0f;
+    float   invMass = 1.0f;
+    float   restitution = 0.25f;
+    float   friction = 0.5f;
+
+    // game properties
+    ShapeType  shape = SHAPE_CIRCLE;
+    ObjectType type = OBJ_BLOCK;
+    Color      color = LIGHTGRAY;
+    bool       active = true;   // if false, skip update/draw
+    bool       alive = true;   // for pigs
+
+    // pig-specific
+    float toughness = 0.0f;
 };
 
-// 2D Halfspace (infinite plane) defined by a pivot point and a unit normal.
-// We control pivotX/pivotY (translate) and angleDeg (rotate around pivot).
-struct Plane2D {
-    float angleDeg = 0.0f;  // rotation about pivot
-    float pivotX = 0.0f;  // center X
-    float pivotY = 700.0f;// center Y
-    Color color = GREEN;
-};
+vector<Body> bodies;
 
-vector<Projectile> projectiles;
+// Slingshot state
+Vector2 slingAnchor{ 200.0f, 550.0f };    // fixed slingshot pivot
+bool    isDragging = false;
+Vector2 dragStart{ 0.0f, 0.0f };
+Vector2 dragEnd{ 0.0f, 0.0f };
 
-// Two adjustable planes
-Plane2D planeA{ 0.0f, 600.0f, 700.0f, GREEN };       // near bottom, flat
-Plane2D planeB{ 25.0f, 900.0f, 520.0f, DARKGREEN };  // a tilted ramp
+int currentBirdType = 0; // 0 = circle, 1 = square
+
+// Ground (static)
+float groundY = 700.0f;
 
 // ------------------------------------------------------------
 // Math helpers
 
-// Plane normal from angle: 0° => (0, -1) (upwards; screen Y+ is down)
-static inline Vector2 PlaneNormal(float angleDeg) {
-    float r = angleDeg * DEG2RAD;
-    return Vector2Normalize({ sinf(r), -cosf(r) });
-}
-
-// Signed distance from point p to plane (pivot p0, unit normal n):
-// d = dot(p - p0, n). Sphere overlaps if (radius - d) > 0.
-static inline float SignedDistanceToPlane(const Vector2& p, const Vector2& p0, const Vector2& n) {
-    return Vector2DotProduct(Vector2Subtract(p, p0), n);
-}
-
-// Sphere-sphere overlap test (returns penetration & normal a->b)
-static inline bool SphereSphereOverlap(const Projectile& a, const Projectile& b,
-    float& penetration, Vector2& normal) {
-    Vector2 ab = Vector2Subtract(b.position, a.position);
-    float dist = Vector2Length(ab);
-    float target = a.radius + b.radius;
-
-    if (dist <= 0.0001f) { normal = { 1.0f, 0.0f }; penetration = target; return true; }
-    if (dist >= target)   return false;
-
-    normal = Vector2Scale(ab, 1.0f / dist); // from a to b
-    penetration = target - dist;
-    return true;
-}
-
-// Safe normalize helper
 static inline Vector2 SafeNormalize(const Vector2& v, const Vector2& fallback = { 1.0f, 0.0f }) {
     float len = Vector2Length(v);
     return (len > 1e-6f) ? Vector2Scale(v, 1.0f / len) : fallback;
 }
 
+// Clamp alias (from raymath)
+static inline float ClampFloat(float x, float minV, float maxV) {
+    return Clamp(x, minV, maxV);
+}
+
+// Section two
 // ------------------------------------------------------------
-// Collision response
+// Body creation helpers
 
-// -------- Sphere–Plane (with restitution + Coulomb friction) --------
-// 1) Separate out of plane along normal by penetration
-// 2) Reflect normal component with restitution (bounce)
-// 3) Apply friction impulse along tangent (static/kinetic Coulomb)
-bool ResolveSphereHalfspace(Projectile& p, const Plane2D& plane) {
-    Vector2 n = PlaneNormal(plane.angleDeg);
-    Vector2 p0 = { plane.pivotX, plane.pivotY };
-    float d = SignedDistanceToPlane(p.position, p0, n);
-    float penetration = p.radius - d;
+Body MakeCircle(ObjectType type, Vector2 pos, float radius, float mass, Color color) {
+    Body b;
+    b.position = pos;
+    b.velocity = { 0.0f, 0.0f };
+    b.radius = radius;
+    b.halfExtents = { radius, radius }; // just for convenience
+    b.mass = mass;
+    b.invMass = (mass > 0.0f) ? 1.0f / mass : 0.0f;
+    b.restitution = globalRestitution;
+    b.friction = globalFrictionCoeff;
+    b.shape = SHAPE_CIRCLE;
+    b.type = type;
+    b.color = color;
+    b.active = true;
+    b.alive = true;
+    b.toughness = (type == OBJ_PIG) ? pigToughness : 0.0f;
+    return b;
+}
 
-    if (penetration <= 0.0f) return false;
+Body MakeAABB(ObjectType type, Vector2 pos, Vector2 halfExtents, float mass, Color color) {
+    Body b;
+    b.position = pos;
+    b.velocity = { 0.0f, 0.0f };
+    b.radius = max(halfExtents.x, halfExtents.y); // handy for debug
+    b.halfExtents = halfExtents;
+    b.mass = mass;
+    b.invMass = (mass > 0.0f) ? 1.0f / mass : 0.0f;
+    b.restitution = globalRestitution;
+    b.friction = globalFrictionCoeff;
+    b.shape = SHAPE_AABB;
+    b.type = type;
+    b.color = color;
+    b.active = true;
+    b.alive = true;
+    b.toughness = (type == OBJ_PIG) ? pigToughness : 0.0f;
+    return b;
+}
 
-    // (1) Separate out of plane
-    p.position = Vector2Add(p.position, Vector2Scale(n, penetration));
+// Section six
+// ------------------------------------------------------------
+// Geometry overlap tests (return penetration + contact normal)
 
-    // Decompose velocity into normal/tangent
-    float vn = Vector2DotProduct(p.velocity, n);              // normal component (scalar)
-    Vector2 t = { n.y, -n.x };                                // tangent unit vector
-    float vt = Vector2DotProduct(p.velocity, t);              // tangential scalar
+// Circle–Circle
+bool CircleCircleOverlap(const Body& a, const Body& b,
+    float& penetration, Vector2& normal) {
+    Vector2 ab = Vector2Subtract(b.position, a.position);
+    float dist = Vector2Length(ab);
+    float target = a.radius + b.radius;
 
-    // (2) Normal bounce (only if going into plane)
-    float jn_mag = 0.0f;
-    if (vn < 0.0f) {
-        // v' = v - (1 + e) * vn * n
-        float delta = (1.0f + restitutionPlane) * vn;         // vn is negative
-        p.velocity = Vector2Subtract(p.velocity, Vector2Scale(n, delta));
-        jn_mag = -(1.0f + restitutionPlane) * vn * p.mass;    // normal impulse magnitude (positive)
+    if (dist <= 0.0001f) {
+        // overlapped almost exactly; choose any normal
+        normal = { 1.0f, 0.0f };
+        penetration = target;
+        return true;
     }
+    if (dist >= target) return false;
 
-    // (3) Coulomb friction impulse along tangent
-    if (jn_mag > 0.0f) {
-        // desired tangential impulse to kill vt
-        float jt_req = -vt * p.mass; // plane is static -> effective mass = m
-        float jt_cap_static = mu_s_plane * jn_mag;
-        float jt_cap_kinetic = mu_k_plane * jn_mag;
-
-        float jt = 0.0f;
-        if (fabsf(vt) < STATIC_VEL_EPS && fabsf(jt_req) <= jt_cap_static) {
-            // Static friction can fully stop tangential motion
-            jt = jt_req;
-        }
-        else {
-            // Kinetic friction clamps to mu_k * jn
-            jt = Clamp(jt_req, -jt_cap_kinetic, jt_cap_kinetic);
-        }
-        // Apply tangential impulse
-        p.velocity = Vector2Add(p.velocity, Vector2Scale(t, jt / p.mass));
-    }
-
+    normal = Vector2Scale(ab, 1.0f / dist);
+    penetration = target - dist;
     return true;
 }
 
-// -------- Sphere–Sphere (impulse + positional correction + friction) --------
-void ResolveSphereSphere(Projectile& a, Projectile& b, float e /*restitutionSS*/) {
-    float penetration; Vector2 n; // normal from a->b
-    if (!SphereSphereOverlap(a, b, penetration, n)) return;
+// AABB–AABB (axis-aligned, centers at position, halfExtents)
+bool AABBAABBOverlap(const Body& a, const Body& b,
+    float& penetration, Vector2& normal) {
+    Vector2 diff = Vector2Subtract(b.position, a.position);
+    float overlapX = a.halfExtents.x + b.halfExtents.x - fabsf(diff.x);
+    float overlapY = a.halfExtents.y + b.halfExtents.y - fabsf(diff.y);
 
-    float invA = (a.mass > 0.0f) ? 1.0f / a.mass : 0.0f;
-    float invB = (b.mass > 0.0f) ? 1.0f / b.mass : 0.0f;
+    if (overlapX <= 0.0f || overlapY <= 0.0f) return false;
+
+    // collision along axis of least penetration
+    if (overlapX < overlapY) {
+        penetration = overlapX;
+        normal = { (diff.x > 0.0f) ? 1.0f : -1.0f, 0.0f };
+    }
+    else {
+        penetration = overlapY;
+        normal = { 0.0f, (diff.y > 0.0f) ? 1.0f : -1.0f };
+    }
+    return true;
+}
+
+// Circle–AABB
+bool CircleAABBOverlap(const Body& circle, const Body& box,
+    float& penetration, Vector2& normal) {
+    // closest point on AABB to circle center
+    Vector2 diff = Vector2Subtract(circle.position, box.position);
+    Vector2 clamped = {
+        Clamp(diff.x, -box.halfExtents.x, box.halfExtents.x),
+        Clamp(diff.y, -box.halfExtents.y, box.halfExtents.y)
+    };
+    Vector2 closest = Vector2Add(box.position, clamped);
+
+    // IMPORTANT: vector from circle -> closest point on box
+    Vector2 v = Vector2Subtract(closest, circle.position);
+    float dist2 = Vector2LengthSqr(v);
+    float r = circle.radius;
+
+    if (dist2 > r * r) return false;
+
+    float dist = sqrtf(dist2);
+
+    if (dist <= 0.0001f) {
+        // Circle center is inside/on the box – pick a normal from circle to box center
+        Vector2 fallback = Vector2Subtract(box.position, circle.position);
+        normal = SafeNormalize(fallback, { 0.0f, 1.0f });
+        penetration = r;  // approximate
+        return true;
+    }
+
+    // normal points from circle -> box (matches ResolveContact assumption)
+    normal = Vector2Scale(v, 1.0f / dist);
+    penetration = r - dist;
+    return true;
+}
+
+// Section seven
+// ------------------------------------------------------------
+// Generic collision resolution (impulse + friction + pig toughness)
+
+void ResolveContact(Body& a, Body& b, float penetration, const Vector2& normal) {
+    if (!a.active || !b.active) return;
+    if (!a.alive || !b.alive)   return;
+
+    float invA = a.invMass;
+    float invB = b.invMass;
     float invSum = invA + invB;
-    if (invSum <= 0.0f) return;
+    if (invSum <= 0.0f) return; // two static objects
 
-    // (A) Positional correction (to prevent sinking)
+	// Section eight
+    // --- (1) Pig toughness check (use pre-collision momenta) ---
+    // approximate "total momentum magnitude" as |m1 v1 - m2 v2|
+    Vector2 p1 = Vector2Scale(a.velocity, a.mass);
+    Vector2 p2 = Vector2Scale(b.velocity, b.mass);
+    float relMomMag = Vector2Length(Vector2Subtract(p1, p2));
+
+    if (a.type == OBJ_PIG && a.alive && relMomMag > a.toughness) {
+        a.alive = false;
+        a.active = false;
+    }
+    if (b.type == OBJ_PIG && b.alive && relMomMag > b.toughness) {
+        b.alive = false;
+        b.active = false;
+    }
+
+    // If pig died, still allow their last interaction to push things
+    // ---------------------------------------------------------------
+
+    // --- (2) Positional correction ---
     float remove = max(penetration - POS_CORRECT_SLOP, 0.0f) * POS_CORRECT_PERCENT / invSum;
-    Vector2 corr = Vector2Scale(n, remove);
+    Vector2 corr = Vector2Scale(normal, remove);
     a.position = Vector2Subtract(a.position, Vector2Scale(corr, invA));
     b.position = Vector2Add(b.position, Vector2Scale(corr, invB));
 
-    // Relative velocity at contact
+    // --- (3) Velocity impulse (normal) ---
     Vector2 rv = Vector2Subtract(b.velocity, a.velocity);
+    float velAlongNormal = Vector2DotProduct(rv, normal);
+    if (velAlongNormal > 0.0f) return; // already separating
 
-    // (B) Normal impulse (bounce)
-    float velAlongNormal = Vector2DotProduct(rv, n);
-    if (velAlongNormal < 0.0f) {
-        float jn = -(1.0f + e) * velAlongNormal;
-        jn /= invSum;
+    float e = min(a.restitution, b.restitution);
+    float j = -(1.0f + e) * velAlongNormal;
+    j /= invSum;
 
-        Vector2 impulseN = Vector2Scale(n, jn);
-        a.velocity = Vector2Subtract(a.velocity, Vector2Scale(impulseN, invA));
-        b.velocity = Vector2Add(b.velocity, Vector2Scale(impulseN, invB));
+    Vector2 impulse = Vector2Scale(normal, j);
+    a.velocity = Vector2Subtract(a.velocity, Vector2Scale(impulse, invA));
+    b.velocity = Vector2Add(b.velocity, Vector2Scale(impulse, invB));
 
-        // (C) Friction impulse along tangent
-        // Recompute relative velocity after normal impulse
-        rv = Vector2Subtract(b.velocity, a.velocity);
-        Vector2 t = SafeNormalize(Vector2Subtract(rv, Vector2Scale(n, Vector2DotProduct(rv, n))), { n.y, -n.x });
-        float vt = Vector2DotProduct(rv, t);
+    // --- (4) Friction impulse (Coulomb, dynamic only for simplicity) ---
+    rv = Vector2Subtract(b.velocity, a.velocity);
+    Vector2 tangent = SafeNormalize(Vector2Subtract(rv, Vector2Scale(normal, Vector2DotProduct(rv, normal))),
+        { -normal.y, normal.x });
+    float vt = Vector2DotProduct(rv, tangent);
+    if (fabsf(vt) < STATIC_VEL_EPS) return; // almost no tangential motion
 
-        // desired friction impulse to kill vt
-        float jt_req = -vt / invSum; // effective mass = 1/(invA+invB)
-        float jt_cap_static = mu_s_ss * jn;
-        float jt_cap_kinetic = mu_k_ss * jn;
+    float mu = 0.5f * (a.friction + b.friction);
+    float jt = -vt / invSum;
+    float maxFriction = mu * j;
 
-        float jt = 0.0f;
-        if (fabsf(vt) < STATIC_VEL_EPS && fabsf(jt_req) <= jt_cap_static) {
-            jt = jt_req; // static friction
+    jt = ClampFloat(jt, -maxFriction, maxFriction);
+    Vector2 frictionImpulse = Vector2Scale(tangent, jt);
+    a.velocity = Vector2Subtract(a.velocity, Vector2Scale(frictionImpulse, invA));
+    b.velocity = Vector2Add(b.velocity, Vector2Scale(frictionImpulse, invB));
+}
+
+// Section three
+// ------------------------------------------------------------
+// World setup
+
+void BuildWorld() {
+    bodies.clear();
+
+    // Ground (big static AABB)
+    {
+        Vector2 pos = { (float)GetScreenWidth() * 0.5f, groundY + 20.0f };
+        Vector2 half = { (float)GetScreenWidth(), 40.0f };
+        Body ground = MakeAABB(OBJ_STATIC_TERRAIN, pos, half, 0.0f, DARKGREEN);
+        ground.restitution = 0.2f;
+        ground.friction = 0.9f;
+        bodies.push_back(ground);
+    }
+
+    // Fort blocks (3+ blocks high)
+    // Simple tower near right side
+    Vector2 basePos = { 850.0f, groundY - 25.0f };
+    Vector2 halfBlock{ 25.0f, 25.0f };
+    float blockMass = 4.0f;
+
+    int cols = 3;
+    int rows = 4;
+
+    for (int y = 0; y < rows; ++y) {
+        for (int x = 0; x < cols; ++x) {
+            Vector2 pos = {
+                basePos.x + (x - (cols / 2)) * (halfBlock.x * 2.2f),
+                basePos.y - y * (halfBlock.y * 2.05f)
+            };
+            Body block = MakeAABB(OBJ_BLOCK, pos, halfBlock, blockMass, BROWN);
+            bodies.push_back(block);
         }
-        else {
-            jt = Clamp(jt_req, -jt_cap_kinetic, jt_cap_kinetic); // kinetic friction
-        }
+    }
 
-        Vector2 impulseT = Vector2Scale(t, jt);
-        a.velocity = Vector2Subtract(a.velocity, Vector2Scale(impulseT, invA));
-        b.velocity = Vector2Add(b.velocity, Vector2Scale(impulseT, invB));
+    // Pigs (circles) on top and inside fort
+    {
+        // on top
+        Vector2 pigPosTop = { basePos.x, basePos.y - rows * (halfBlock.y * 2.1f) - 20.0f };
+        Body pigTop = MakeCircle(OBJ_PIG, pigPosTop, 15.0f, 1.5f, GREEN);
+        bodies.push_back(pigTop);
+
+        // inside fort (middle row)
+        Vector2 pigInside = { basePos.x, basePos.y - 1.5f * (halfBlock.y * 2.0f) };
+        Body pigIn = MakeCircle(OBJ_PIG, pigInside, 15.0f, 1.5f, GREEN);
+        bodies.push_back(pigIn);
     }
 }
 
-// ------------------------------------------------------------
-// Launch projectile
-void LaunchProjectile(float speed, float angleDeg) {
-    Projectile p;
-    p.position = { 200.0f, (float)GetScreenHeight() - 200.0f };
-    p.velocity = { cosf(angleDeg * DEG2RAD) * speed, -sinf(angleDeg * DEG2RAD) * speed };
-    p.active = true;
-    p.color = LIGHTGRAY;
-    p.mass = 1.0f;
-    projectiles.push_back(p);
+// Create a bird at the slingshot anchor
+void SpawnBird(const Vector2& velocity) {
+    Body bird;
+    if (currentBirdType == 0) {
+        // Circular light bird
+        bird = MakeCircle(OBJ_BIRD, slingAnchor, 12.0f, 1.0f, YELLOW);
+    }
+    else {
+        // Square heavy bird
+        bird = MakeAABB(OBJ_BIRD, slingAnchor, { 14.0f, 14.0f }, 4.0f, RED);
+    }
+    bird.velocity = velocity;
+    bodies.push_back(bird);
 }
 
+// Section four
 // ------------------------------------------------------------
-static void DrawPlane(const Plane2D& pl) {
-    Vector2 n = PlaneNormal(pl.angleDeg);
-    Vector2 t = { n.y, -n.x };  // tangent
-    Vector2 p0 = { pl.pivotX, pl.pivotY };
+// Input handling (slingshot + bird switching)
 
-    const float span = 4000.0f;
-    const float thickness = 3.0f;
-    const float normalLen = 45.0f;
+void HandleSlingshotInput() {
+    Vector2 mouse = GetMousePosition();
 
-    Vector2 a = Vector2Add(p0, Vector2Scale(t, -span));
-    Vector2 b = Vector2Add(p0, Vector2Scale(t, span));
-    DrawLineEx(a, b, thickness, pl.color);
+    // Switch bird type (TAB)
+    if (IsKeyPressed(KEY_TAB)) {
+        currentBirdType = 1 - currentBirdType;
+    }
 
-    // Normal arrow
-    Vector2 mid = Vector2Lerp(a, b, 0.5f);
-    Vector2 tip = Vector2Add(mid, Vector2Scale(n, normalLen));
-    DrawLineEx(mid, tip, thickness * 0.7f, Fade(pl.color, 0.85f));
-    DrawCircleV(tip, thickness * 0.7f, pl.color);
+    // Reset world (R)
+    if (IsKeyPressed(KEY_R)) {
+        BuildWorld();
+    }
 
-    // Pivot dot
-    DrawCircleV(p0, thickness, pl.color);
+    // Start drag near slingshot anchor
+    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+        float dist = Vector2Distance(mouse, slingAnchor);
+        if (dist < 60.0f) {
+            isDragging = true;
+            dragStart = slingAnchor;
+            dragEnd = mouse;
+        }
+    }
+
+    if (isDragging) {
+        dragEnd = mouse;
+
+        if (IsMouseButtonReleased(MOUSE_LEFT_BUTTON)) {
+            // Compute launch velocity from drag
+            Vector2 dragVec = Vector2Subtract(dragStart, dragEnd); // pull back from anchor
+            float dragLen = Vector2Length(dragVec);
+            if (dragLen > 5.0f) {
+                float clampedLen = ClampFloat(dragLen, 0.0f, maxSlingshotPower / powerScale);
+                Vector2 dir = Vector2Scale(dragVec, 1.0f / dragLen);
+                float speed = clampedLen * powerScale;
+                Vector2 vel = Vector2Scale(dir, speed);
+                SpawnBird(vel);
+            }
+            isDragging = false;
+        }
+    }
+}
+
+// Section five
+// ------------------------------------------------------------
+// Physics update
+
+void UpdatePhysics() {
+    // Integrate velocities & positions
+    for (auto& b : bodies) {
+        if (!b.active) continue;
+        if (b.invMass == 0.0f) continue; // static
+
+        // gravity
+        b.velocity.y += gravityAcc * dt;
+
+        // integrate
+        b.position.x += b.velocity.x * dt;
+        b.position.y += b.velocity.y * dt;
+    }
+
+    // Collision detection & response (all pairs)
+    const size_t n = bodies.size();
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t j = i + 1; j < n; ++j) {
+            Body& a = bodies[i];
+            Body& b = bodies[j];
+            if (!a.active || !b.active) continue;
+
+            float penetration = 0.0f;
+            Vector2 normal{ 0.0f, 0.0f };
+            bool overlapped = false;
+
+            if (a.shape == SHAPE_CIRCLE && b.shape == SHAPE_CIRCLE) {
+                overlapped = CircleCircleOverlap(a, b, penetration, normal);
+            }
+            else if (a.shape == SHAPE_AABB && b.shape == SHAPE_AABB) {
+                overlapped = AABBAABBOverlap(a, b, penetration, normal);
+            }
+            else if (a.shape == SHAPE_CIRCLE && b.shape == SHAPE_AABB) {
+                overlapped = CircleAABBOverlap(a, b, penetration, normal);
+            }
+            else if (a.shape == SHAPE_AABB && b.shape == SHAPE_CIRCLE) {
+                overlapped = CircleAABBOverlap(b, a, penetration, normal);
+                normal = Vector2Scale(normal, -1.0f); // flip to a->b
+            }
+
+            if (overlapped) {
+                ResolveContact(a, b, penetration, normal);
+            }
+        }
+    }
+
+    // Small damping for sleeping objects
+    for (auto& b : bodies) {
+        if (!b.active || b.invMass == 0.0f) continue;
+        if (fabsf(b.velocity.x) < 0.02f && fabsf(b.velocity.y) < 0.02f) {
+            b.velocity = { 0.0f, 0.0f };
+        }
+    }
 }
 
 // ------------------------------------------------------------
@@ -257,57 +470,60 @@ void update() {
     dt = 1.0f / TARGET_FPS;
     timeElapsed += dt;
 
-    if (IsKeyPressed(KEY_SPACE))
-        LaunchProjectile(launchSpeed, launchAngle);
+    // Update pig toughness & friction/restitution into new bodies too
+    // (for simplicity, some properties are applied when building world or spawning birds)
 
-    // Optional: spawn at mouse
-    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
-        Projectile p;
-        p.position = GetMousePosition();
-        p.velocity = { 0.0f, 0.0f };
-        p.active = true;
-        p.color = LIGHTGRAY;
-        p.mass = 1.0f;
-        projectiles.push_back(p);
-    }
+    HandleSlingshotInput();
+    UpdatePhysics();
+}
 
-    // Integrate
-    for (auto& p : projectiles) {
-        if (!p.active) continue;
-        p.velocity.y += gravityAcc * dt;
-        p.position.x += p.velocity.x * dt;
-        p.position.y += p.velocity.y * dt;
-    }
+// ------------------------------------------------------------
+// Drawing helpers
 
-    // Base color each frame
-    for (auto& p : projectiles) p.color = LIGHTGRAY;
+void DrawBody(const Body& b) {
+    if (!b.active) return;
 
-    // Sphere–Sphere response (do all pairs)
-    for (size_t i = 0; i < projectiles.size(); ++i) {
-        for (size_t j = i + 1; j < projectiles.size(); ++j) {
-            ResolveSphereSphere(projectiles[i], projectiles[j], restitutionSS);
+    if (b.shape == SHAPE_CIRCLE) {
+        Color c = b.color;
+        if (b.type == OBJ_PIG) {
+            c = b.alive ? GREEN : DARKGREEN;
         }
+        DrawCircleV(b.position, b.radius, c);
     }
-    // Color pairs still overlapping (feedback)
-    for (size_t i = 0; i < projectiles.size(); ++i) {
-        for (size_t j = i + 1; j < projectiles.size(); ++j) {
-            float pen; Vector2 n;
-            if (SphereSphereOverlap(projectiles[i], projectiles[j], pen, n)) {
-                projectiles[i].color = RED;
-                projectiles[j].color = RED;
-            }
-        }
+    else {
+        // AABB
+        Rectangle rect;
+        rect.width = b.halfExtents.x * 2.0f;
+        rect.height = b.halfExtents.y * 2.0f;
+        rect.x = b.position.x - b.halfExtents.x;
+        rect.y = b.position.y - b.halfExtents.y;
+
+        DrawRectangleRec(rect, b.color);
+    }
+}
+
+void DrawSlingshot() {
+    // Stand
+    DrawCircleV(slingAnchor, 8.0f, DARKBROWN);
+    DrawRectangle(slingAnchor.x - 6, slingAnchor.y, 12, 80, DARKBROWN);
+
+    // Current bird preview
+    if (currentBirdType == 0) {
+        DrawCircleV(slingAnchor, 12.0f, YELLOW);
+    }
+    else {
+        Rectangle r{
+            slingAnchor.x - 14.0f,
+            slingAnchor.y - 14.0f,
+            28.0f, 28.0f
+        };
+        DrawRectangleRec(r, RED);
     }
 
-    // Sphere–Plane response (both planes)
-    for (auto& p : projectiles) {
-        bool hitA = ResolveSphereHalfspace(p, planeA);
-        bool hitB = ResolveSphereHalfspace(p, planeB);
-        if (hitA || hitB) p.color = RED;
-
-        // settle threshold to kill micro-jitter
-        if (fabsf(p.velocity.x) < 0.02f && fabsf(p.velocity.y) < 0.02f)
-            p.velocity = { 0.0f, 0.0f };
+    // Drag rubber band
+    if (isDragging) {
+        DrawLineEx(slingAnchor, dragEnd, 3.0f, DARKGRAY);
+        DrawCircleV(dragEnd, 6.0f, GRAY);
     }
 }
 
@@ -326,8 +542,8 @@ void draw() {
 
     // ----------------- GUI (two columns) -----------------
     const float colWidth = 240.0f;
-    const float colGap = 100.0f;
-    const float col1X = 150.0f;
+    const float colGap = 80.0f;
+    const float col1X = 140.0f;
     const float col2X = col1X + colWidth + colGap;
     const float topY = 40.0f;
     const float DY = 30.0f;
@@ -335,93 +551,71 @@ void draw() {
     float y1 = topY;
     float y2 = topY;
 
-    // ------- Column 1: core projectile & plane friction -------
-
-    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Speed",
-        TextFormat("%.0f", launchSpeed), &launchSpeed, 50, 600); y1 += DY;
-    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Angle",
-        TextFormat("%.0f", launchAngle), &launchAngle, 0, 90); y1 += DY;
+    // ------- Column 1: core physics -------
     GuiSliderBar({ col1X, y1, colWidth, 20 }, "Gravity",
-        TextFormat("%.0f", gravityAcc), &gravityAcc, -1200, 1200); y1 += DY + 6;
+        TextFormat("%.0f", gravityAcc), &gravityAcc, 100.0f, 1200.0f); y1 += DY;
 
-    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Restitution (S-S)",
-        TextFormat("%.2f", restitutionSS), &restitutionSS, 0.0f, 1.0f); y1 += DY;
-    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Restitution (S-Plane)",
-        TextFormat("%.2f", restitutionPlane), &restitutionPlane, 0.0f, 1.0f); y1 += DY + 10;
+    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Restitution",
+        TextFormat("%.2f", globalRestitution), &globalRestitution, 0.0f, 1.0f); y1 += DY;
 
-    // Plane friction checkbox + sliders
-    DrawText("Friction (Plane)", col1X, y1 - 6, 18, LIGHTGRAY); y1 += DY;
-    GuiSliderBar({ col1X, y1, colWidth, 20 }, "mu_s (static)",
-        TextFormat("%.2f", mu_s_plane), &mu_s_plane, 0.0f, 1.5f); y1 += DY;
-    GuiSliderBar({ col1X, y1, colWidth, 20 }, "mu_k (kinetic)",
-        TextFormat("%.2f", mu_k_plane), &mu_k_plane, 0.0f, 1.5f); y1 += DY + 10;
+    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Friction (mu)",
+        TextFormat("%.2f", globalFrictionCoeff), &globalFrictionCoeff, 0.0f, 1.5f); y1 += DY + 10;
 
-    // Plane A controls
-    DrawText("Plane A (Ground)", col1X, y1 - 6, 18, LIGHTGRAY); y1 += DY;
-    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Pos X",
-        TextFormat("%.0f", planeA.pivotX), &planeA.pivotX, 0, (float)GetScreenWidth()); y1 += DY;
-    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Pos Y",
-        TextFormat("%.0f", planeA.pivotY), &planeA.pivotY, 0, (float)GetScreenHeight()); y1 += DY;
-    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Angle",
-        TextFormat("%.0f", planeA.angleDeg), &planeA.angleDeg, -90.0f, 90.0f); y1 += DY;
+    GuiSliderBar({ col1X, y1, colWidth, 20 }, "Pig Toughness",
+        TextFormat("%.0f", pigToughness), &pigToughness, 50.0f, 800.0f); y1 += DY + 10;
 
-    // ------- Column 2: sphere–sphere friction & Plane B -------
+    // ------- Column 2: slingshot tuning -------
+    DrawText("Slingshot", col2X, y2 - 6, 18, LIGHTGRAY); y2 += DY;
+    GuiSliderBar({ col2X, y2, colWidth, 20 }, "Max Power",
+        TextFormat("%.0f", maxSlingshotPower), &maxSlingshotPower, 200.0f, 1500.0f); y2 += DY;
 
+    GuiSliderBar({ col2X, y2, colWidth, 20 }, "Power Scale",
+        TextFormat("%.1f", powerScale), &powerScale, 2.0f, 10.0f); y2 += DY;
 
-    DrawText("Friction (Sphere-Sphere)", col2X, y2 - 6, 18, LIGHTGRAY); y2 += DY;
-    GuiSliderBar({ col2X, y2, colWidth, 20 }, "mu_s (static)",
-        TextFormat("%.2f", mu_s_ss), &mu_s_ss, 0.0f, 1.5f); y2 += DY;
-    GuiSliderBar({ col2X, y2, colWidth, 20 }, "mu_k (kinetic)",
-        TextFormat("%.2f", mu_k_ss), &mu_k_ss, 0.0f, 1.5f); y2 += DY + 10;
-
-    // Plane B controls
-    DrawText("Plane B (Ramp)", col2X, y2 - 6, 18, LIGHTGRAY); y2 += DY;
-    GuiSliderBar({ col2X, y2, colWidth, 20 }, "Pos X",
-        TextFormat("%.0f", planeB.pivotX), &planeB.pivotX, 0, (float)GetScreenWidth()); y2 += DY;
-    GuiSliderBar({ col2X, y2, colWidth, 20 }, "Pos Y",
-        TextFormat("%.0f", planeB.pivotY), &planeB.pivotY, 0, (float)GetScreenHeight()); y2 += DY;
-    GuiSliderBar({ col2X, y2, colWidth, 20 }, "Angle",
-        TextFormat("%.0f", planeB.angleDeg), &planeB.angleDeg, -90.0f, 90.0f); y2 += DY;
+    // Bird type label
+    const char* birdLabel = (currentBirdType == 0) ? "Bird: Circle (light)" : "Bird: Square (heavy)";
+    DrawText(birdLabel, col2X, y2 + 4, 18, YELLOW); y2 += DY;
 
     // ----------------- Scene drawing -----------------
 
-    // Launch guide
-    Vector2 startPos = { 200.0f, (float)GetScreenHeight() - 200.0f };
-    Vector2 guide = { cosf(launchAngle * DEG2RAD) * launchSpeed,
-                         -sinf(launchAngle * DEG2RAD) * launchSpeed };
-    DrawLineEx(startPos, Vector2Add(startPos, Vector2Scale(guide, 0.2f)), 3, RED);
+    // Slingshot
+    DrawSlingshot();
 
-    // Draw planes
-    DrawPlane(planeA);
-    DrawPlane(planeB);
+    // Bodies
+    for (auto& b : bodies) {
+        DrawBody(b);
+    }
 
-    // Draw spheres
-    for (auto& p : projectiles)
-        DrawCircleV(p.position, p.radius, p.color);
-
-    // Instructions text at bottom
-    DrawText("SPACE: launch | LMB: spawn at mouse\n"
-        "Lab 6: Toggle friction ON/OFF for Plane and Sphere–Sphere to A/B compare.\n"
-        "Adjust mu_s/mu_k and restitution to see sliding vs sticking and bounce.",
-        20, GetScreenHeight() - 140, 18, GRAY);
+    // Instructions
+    DrawText(
+        "Controls:\n"
+        "  LMB near slingshot: click, drag, release to launch.\n"
+        "  TAB: switch bird (circle vs square).\n"
+        "  R: reset fort.\n"
+        "Notes:\n"
+        "  - Pigs (green) die when collision momentum exceeds their Toughness.\n"
+        "  - Blocks are AABB, Birds can be Sphere or AABB.\n"
+        "  - Collisions use impulses with restitution and friction.",
+        20, GetScreenHeight() - 200, 18, GRAY);
 
     EndDrawing();
 }
-
 
 // ------------------------------------------------------------
 int main() {
     InitWindow(1200, 800, ("Game Physics - " + studentName + " " + studentNumber).c_str());
     SetTargetFPS(TARGET_FPS);
 
-    // Nice starting pivots
-    planeA.pivotX = GetScreenWidth() * 0.50f;
-    planeB.pivotX = GetScreenWidth() * 0.75f;
+    groundY = 700.0f;
+    slingAnchor = { 200.0f, groundY - 150.0f };
+
+    BuildWorld();
 
     while (!WindowShouldClose()) {
         update();
         draw();
     }
+
     CloseWindow();
     return 0;
 }
